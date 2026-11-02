@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Session Find",
-    "description": "Press Ctrl+F to search the current session, Notepad style: live match count, next/previous navigation and highlighted hits."
+    "description": "Press Ctrl+F to search the current session, Notepad style: live match count, next/previous navigation and highlighted hits. Press Tab to search only your own messages, only the assistant's output, or everything."
   }
 }

@@ -1,9 +1,9 @@
 # 会话内查找 · DSH Session Find
 
-在 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/deepseek-harness) 客户端里按 `Ctrl+F`，像记事本一样在当前会话中查找文本：输入即搜、显示「第几条 / 共几条」、逐条跳转，并在原位高亮全部命中。
+在 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/deepseek-harness) 客户端里按 `Ctrl+F`，像记事本一样在当前会话中查找文本：输入即搜、显示「第几条 / 共几条」、逐条跳转，并在原位高亮全部命中。按 `Tab` 还能把搜索范围收窄到「我」或「AI」，长会话里只找自己说过的话或只看助手答过什么。
 
 ```
- 🔍  在当前会话中查找                    3/17    Aa   |ab|    ↑   ↓   ×
+ 🔍  在当前会话中查找          3/17 │ 全部 我 AI  Aa  |ab|  ↑   ↓   ×
 ```
 
 - **纯前端**：零运行时依赖，无网络请求，不上报任何数据
@@ -23,8 +23,9 @@
 | 边输边搜 | 90 ms 防抖，实时更新「当前 / 总数」 |
 | 就地高亮 | 所有命中淡色标记，当前命中实色标记 |
 | 逐条跳转 | `Enter` 下一个、`Shift+Enter` 上一个，到末尾自动环绕 |
-| 区分大小写 | 工具行 `Aa` 开关 |
-| 全字匹配 | 工具行 `\|ab\|` 开关 |
+| 搜索范围 | `Tab` / `Shift+Tab` 在「全部 → 我 → AI」之间循环，也可点选三段按钮 |
+| 区分大小写 | 工具行 `Aa` 开关（`Alt+C`） |
+| 全字匹配 | 工具行 `\|ab\|` 开关（`Alt+W`） |
 | 流式跟随 | 助手边输出边更新匹配数（250 ms 防抖），不会打断输入 |
 | 拖动 / 复位 | 抓任意非控件区域拖动；双击回到顶部居中 |
 | 无结果提示 | 计数区变红显示「无结果」 |
@@ -97,10 +98,26 @@ dsh plugin --profile desktop add "D:\path\to\session-find"
 1. 打开任意有内容的会话，按 `Ctrl+F`。
 2. 输入关键词，命中数立即出现在输入框右侧。
 3. `Enter` 逐个向下、`Shift+Enter` 逐个向上；也可点工具行的 ↑ / ↓。
-4. 需要精确匹配时打开 `Aa`（区分大小写）或 `|ab|`（全字匹配）。
+4. 需要精确匹配时打开 `Aa`（区分大小写，`Alt+C`）或 `|ab|`（全字匹配，`Alt+W`）。
 5. `Esc` 关闭。
 
 **关于拖动**：拖动后位置在本次运行内保留（关闭再打开仍在原处），重启应用回到顶部居中。双击查找条空白处可立即复位。
+
+### 搜索范围（我 / AI）
+
+输入框右侧的三段按钮（`全部` / `我` / `AI`）决定扫哪些行；**打开查找条后直接按 `Tab` 就能在三者之间循环**，`Shift+Tab` 反向循环。范围会跟着查找条一起记住，关掉再开还是上次选的那个。
+
+| 范围 | 命中的内容 |
+| --- | --- |
+| `全部` | 当前会话里已渲染的所有文本，也就是这个插件加入搜索范围之前的默认行为 |
+| `我` | 你发出的消息：普通输入，以及运行中追加的 steering 消息 |
+| `AI` | 助手一侧的输出：回答正文、思考过程、工具调用与工具结果、重试与额度/长度上限提示、上下文压缩摘要 |
+
+两个过滤范围都**不包含**既不属于你、也不属于助手的界面文本：系统提示词、注入的上下文行、命令行、以及「思考了 12 秒」这类分组标题。所以走 `AI` 时看到的是助手真正产出的内容，而不是把整块折叠区域里的装饰也算进去。
+
+范围只改变「扫哪些行」，不影响 `Aa` / `|ab|`、计数、跳转和高亮的其它行为；切换范围会重新从第一条开始。
+
+> **`Tab` 只在这个查找条里被接管**：焦点在输入框时按 `Tab` 切范围，是为了 Ctrl+F 之后手不离键就能收窄范围。其余按钮不受影响——用鼠标点，或按 `Alt+C` / `Alt+W` 开关两个匹配选项，焦点不在输入框时 `Tab` 仍是正常的焦点切换。
 
 ---
 
@@ -114,6 +131,7 @@ dsh plugin --profile desktop add "D:\path\to\session-find"
 │    ├─ ctx.slots.inject('shell.overlay') → 查找条 UI    │
 │    ├─ window keydown (capture) → Ctrl+F / Esc          │
 │    ├─ 定位搜索区域 → TreeWalker 收集文本节点 → 匹配    │
+│    ├─ 读 data-chat-flow-kind → 我 / AI 归类与过滤      │
 │    └─ CSS.highlights 叠加 Range → 滚动到当前命中       │
 └────────────────────────────────────────────────────────┘
 ┌────────────── Host（Node 进程）────────────────────────┐
@@ -124,9 +142,10 @@ dsh plugin --profile desktop add "D:\path\to\session-find"
 1. **挂载**：客户端模块向 `shell.overlay`（全帧浮层，位于所有列之上、滚动容器之外）注册一个 `id: session-find` 的条目。该浮层本身是点击穿透的，查找条只在自己身上恢复指针事件。
 2. **搜索区域**：不用脆弱的 class 选择器，而是用 `document.elementFromPoint()` 在内容列取样，向上取「占视口 30%–92% 面积」的最高祖先，即会话内容列（聊天区 + 标题）。取样失败时退回「面积最大的可滚动容器」。
 3. **匹配**：`TreeWalker` 遍历文本节点，跳过 `input/textarea/button/script/style`、`contenteditable`（输入框）、隐藏元素以及查找条自身；逐节点 `indexOf` 收集命中，支持大小写与全字匹配。
-4. **高亮**：用 `Range` 构造 `Highlight` 注册到 `CSS.highlights`，两组样式分别给「全部命中」与「当前命中」，用 `::highlight()` 上色。**不包裹、不替换任何会话 DOM**，关闭时整体删除。
-5. **跟随**：查找条打开期间用 `MutationObserver`（250 ms 防抖）重扫，因此助手流式输出时计数会自动变化。
-6. **兜底**：若启发的区域没有命中但整页存在该文本（例如某版本布局与启发式不符），自动放宽到全页搜索一次，避免误报「无结果」。
+4. **归类来源**：Chat 视图给每一行会话打了一个 `data-chat-flow-kind`（用户消息 `user` / `steering`，助手一侧 `assistant-step` / `turn-process` / `tool-call` 等）。扫描时从文本节点向上找最近的一个带该属性的祖先，就得到这一行属于谁；每行的上下文按元素缓存，一次扫描里同一个祖先只读一次属性。选「全部」时这段逻辑完全不执行，所以默认路径的开销和加这个功能之前一样。
+5. **高亮**：用 `Range` 构造 `Highlight` 注册到 `CSS.highlights`，两组样式分别给「全部命中」与「当前命中」，用 `::highlight()` 上色。**不包裹、不替换任何会话 DOM**，关闭时整体删除。
+6. **跟随**：查找条打开期间用 `MutationObserver`（250 ms 防抖）重扫，因此助手流式输出时计数会自动变化。
+7. **兜底**：若启发的区域没有命中但整页存在该文本（例如某版本布局与启发式不符），自动放宽到全页搜索一次，避免误报「无结果」。
 
 ### 性能与上限
 
@@ -136,6 +155,7 @@ dsh plugin --profile desktop add "D:\path\to\session-find"
 | 命中上限 | 2,000 | 超出后停止收集，计数显示实际收集数 |
 | 输入防抖 | 90 ms | 连续输入只扫最后一次 |
 | 内容变更防抖 | 250 ms | 流式输出期间合并重扫 |
+| 来源归类 | 按祖先元素缓存 | `全部` 范围不读取任何归属信息，零额外开销 |
 
 ---
 
@@ -143,8 +163,9 @@ dsh plugin --profile desktop add "D:\path\to\session-find"
 
 - 需要 **Chromium 105+**：`CSS Custom Highlight API`（高亮）与 `Element.checkVisibility()`（可见性过滤）。DSH 桌面版内嵌的 Chromium 满足要求。
 - 高亮不可用时**优雅降级**：计数、跳转、滚动照常，只是没有彩色标记。
-- 已在 DSH `0.2.1-rc.3` 桌面版验证；插件只依赖 `shell.overlay` 槽位、`ctx.slots` 与 `locale` 服务这些稳定扩展点。
-- 宿主快捷键 `Ctrl+F` 未被占用（DSH 自身用的是 `Ctrl+Alt+F` 做会话 fork），不存在抢占。
+- 已在 DSH `0.2.1-rc.3` 桌面版验证；插件只依赖 `shell.overlay` 槽位、`ctx.slots` 与 `locale` 服务这些稳定扩展点。来源归类读的行标记在 `0.2.1-rc.5` 的 Chat 视图里仍然存在。
+- **来源筛选依赖宿主的行标记**：`data-chat-flow-kind` 是 Chat 视图自己也在用的属性（它的 CSS 直接按 `[data-chat-flow-kind=user]` 选行），但不属于插件 API。某一版宿主不再提供它时，三段落范围按钮会置灰并显示原因，搜索自动退回「全部」——功能变少，而不是给出恒为 0 的假结果。
+- 宿主快捷键 `Ctrl+F` 未被占用（DSH 自身用的是 `Ctrl+Alt+F` 做会话 fork），不存在抢占；`Alt+C` / `Alt+W` 也只在这个查找条拿到焦点时才生效。
 
 ---
 
@@ -153,7 +174,9 @@ dsh plugin --profile desktop add "D:\path\to\session-find"
 - **只搜索已渲染的内容**：虚拟滚动未渲染的早期消息、折叠的工具详情、图片中的文字都不参与匹配。
 - **匹配不跨文本节点**：如果一段文字被内联标记拆成多个节点（如 `foo**bar**`），跨节点命中会漏掉。
 - **大小写不敏感模式下**极少数 Unicode（例如土耳其语 `İ`）在 `toLowerCase` 后长度变化，命中位置可能偏移一个字符。
-- **位置不跨重启记忆**：拖动结果只保留在本次运行中（如需持久化，应走插件自己的存储服务，而不是 `localStorage`）。
+- **范围只在有行标记的视图里可用**：切到 Trajectory 这类不逐条渲染消息的视图时，三段按钮置灰，搜索保持「全部」。
+- **范围是按行判定的**：一行里的所有文字同属一个范围。工具调用的参数与结果算「AI」；系统提示词、注入上下文、命令行和分组标题两个范围都不算。
+- **位置不跨重启记忆**：拖动结果只保留在本次运行中（如需持久化，应走插件自己的存储服务，而不是 `localStorage`）。搜索范围同样只在本次运行内记住。
 - 未实现「方向：向上/向下」这类对话框语义，等价能力已由 `Shift+Enter` / ↑ 提供。
 
 ---
@@ -221,7 +244,10 @@ plugin_manager  action=install_bundle  target=<本目录绝对路径>
 先确认窗口已加载新模块（刷新/重启一次）。若仍无反应，检查是否有其它插件或输入法抢占了该组合键；可临时改用界面上的入口（若你的宿主版本在插件页提供）。
 
 **计数为 0，但屏幕上明明有这个字？**
-多半是该内容尚未渲染（更早的历史、折叠块）。向上滚动加载后再试，或换更短的关键词。
+先看范围是不是停在了「我」或「AI」上（`Tab` 切回「全部」试试）。若范围没问题，多半是该内容尚未渲染（更早的历史、折叠块）。向上滚动加载后再试，或换更短的关键词。
+
+**「我 / AI」两个按钮是灰的？**
+当前视图没有逐条渲染消息的行标记（例如切到了 Trajectory），插件无法判断某段文字属于谁，于是收起了筛选、继续搜索全部内容。回到 Chat 视图即可使用。
 
 **高亮不出现，但计数正常？**
 内核低于 Chromium 105（无 `CSS.highlights`）。属于预期降级。
@@ -244,17 +270,20 @@ plugin_manager  action=install_bundle  target=<本目录绝对路径>
 
 ## English
 
-**DSH Session Find** — press `Ctrl+F` in a DSH session to search it like Notepad: live match counter, in-place highlighting, and next/previous navigation.
+**DSH Session Find** — press `Ctrl+F` in a DSH session to search it like Notepad: live match counter, in-place highlighting, and next/previous navigation. Press `Tab` to narrow the search to just your own messages or just the assistant's output.
 
 - Zero dependencies, no network requests, no session data is read or modified.
 - Highlights are painted with the CSS Custom Highlight API, so no conversation DOM is touched.
+- Search scope — everything, just what you sent, or just what the assistant produced — is classified from the row markers the Chat view already renders.
 - Bilingual UI (English / 中文) and automatic light/dark theming through `--dsw-alias-*` tokens.
 - Draggable bar, top-centered by default, double-click to reset.
 
 **Install** — either let the DSH assistant run `plugin_manager install_bundle` with this directory as `target`, or install the package into the profile with `dsh plugin --profile <name> add <path>` and enable the bundle in Settings → Plugins. The client module loads when the window boots, so reload once after installing.
 
-**Shortcuts** — `Ctrl+F` open/focus · `Enter` next · `Shift+Enter` previous · `Esc` close · `Aa` match case · `|ab|` whole word.
+**Shortcuts** — `Ctrl+F` open/focus · `Tab` / `Shift+Tab` switch search scope · `Enter` next · `Shift+Enter` previous · `Esc` close · `Aa` match case (`Alt+C`) · `|ab|` whole word (`Alt+W`).
 
-**Limits** — only rendered content is searched; matches never span two text nodes; results are capped at 2,000 hits per 2 MB of scanned text.
+**Scopes** — `All` searches every rendered row (the original behaviour). `Me` keeps your messages and steering messages. `AI` keeps the assistant's side: answers, reasoning, tool calls and results, retry/limit notices and compaction summaries. System prompts, injected context, command rows and group chrome belong to neither side. The three options grey out with an explanation in views that render no per-message rows, and the search falls back to `All` there.
+
+**Limits** — only rendered content is searched; matches never span two text nodes; results are capped at 2,000 hits per 2 MB of scanned text; scope is classified per row.
 
 MIT licensed.

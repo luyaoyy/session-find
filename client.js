@@ -6,6 +6,10 @@
  * in place with the CSS Custom Highlight API, and walks the hits with
  * Enter / Shift+Enter (or the previous/next buttons). Escape closes it.
  *
+ * The scan can be narrowed to one side of the conversation: everything, only
+ * the user's own input, or only what the assistant produced. Tab / Shift+Tab
+ * cycle that scope, and the same three choices are on the bar itself.
+ *
  * The scan is deliberately limited to what the Session view has rendered: the
  * bar never reads session events, never writes into another component's DOM and
  * never mounts anything outside its own overlay entry.
@@ -26,6 +30,23 @@ window.__ModuleLoader__.load({
     const QUERY_DEBOUNCE = 90;
     const LIVE_DEBOUNCE = 250;
 
+    // Scopes, in the order Tab cycles them.
+    const SCOPE_ALL = 'all';
+    const SCOPE_USER = 'user';
+    const SCOPE_AI = 'ai';
+    const SCOPE_ORDER = [SCOPE_ALL, SCOPE_USER, SCOPE_AI];
+
+    // The Chat view tags every transcript row with the kind of node it renders.
+    // That attribute is the only way to tell the user's own words from the
+    // assistant's without reading session data, so a region without it keeps
+    // the scoped modes disabled instead of silently reporting zero hits.
+    const KIND_ATTR = 'data-chat-flow-kind';
+    const USER_KINDS = new Set(['user', 'steering']);
+    const AI_KINDS = new Set([
+      'assistant-step', 'turn-process', 'tool-call', 'model-retry',
+      'turn-error', 'turn-max-tokens', 'compaction', 'manual-compaction',
+    ]);
+
     const SKIP_TAGS = new Set([
       'SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE', 'TEXTAREA', 'INPUT',
       'SELECT', 'OPTION', 'BUTTON', 'IFRAME', 'OBJECT', 'CANVAS',
@@ -38,28 +59,50 @@ window.__ModuleLoader__.load({
       placeholder: 'Find in current session',
       previous: 'Previous match (Shift+Enter)',
       next: 'Next match (Enter)',
-      matchCase: 'Match case',
-      wholeWord: 'Match whole word',
+      matchCase: 'Match case (Alt+C)',
+      wholeWord: 'Match whole word (Alt+W)',
       close: 'Close (Esc)',
       noResults: 'No results',
       dragHint: 'Drag to move, double-click to reset',
+      scopeGroup: 'Search scope',
+      scopeAll: 'All',
+      scopeAllTitle: 'Search the whole session (Tab switches scope)',
+      scopeUser: 'Me',
+      scopeUserTitle: 'Search only what you sent (Tab switches scope)',
+      scopeAi: 'AI',
+      scopeAiTitle: 'Search only what the assistant produced (Tab switches scope)',
+      scopeUnavailable: 'This view does not distinguish message sources',
     };
     const ZH = {
       title: '在当前会话中查找',
       placeholder: '在当前会话中查找',
       previous: '上一个匹配（Shift+Enter）',
       next: '下一个匹配（Enter）',
-      matchCase: '区分大小写',
-      wholeWord: '全字匹配',
+      matchCase: '区分大小写（Alt+C）',
+      wholeWord: '全字匹配（Alt+W）',
       close: '关闭（Esc）',
       noResults: '无结果',
       dragHint: '按住拖动查找条，双击复位',
+      scopeGroup: '搜索范围',
+      scopeAll: '全部',
+      scopeAllTitle: '搜索整个会话（Tab 切换范围）',
+      scopeUser: '我',
+      scopeUserTitle: '只搜索我发送的内容（Tab 切换范围）',
+      scopeAi: 'AI',
+      scopeAiTitle: '只搜索 AI 的输出（Tab 切换范围）',
+      scopeUnavailable: '当前视图没有可区分来源的消息',
+    };
+    // Label and tooltip keys per scope, so the bar can render from SCOPE_ORDER.
+    const SCOPE_TEXT = {
+      all: { label: 'scopeAll', title: 'scopeAllTitle' },
+      user: { label: 'scopeUser', title: 'scopeUserTitle' },
+      ai: { label: 'scopeAi', title: 'scopeAiTitle' },
     };
 
     const STYLE_TEXT = [
       '.dsf-root { position: fixed; top: 14px; left: 50%; transform: translateX(-50%); z-index: 1; pointer-events: auto; }',
       '.dsf-bar { display: flex; align-items: center; gap: 4px; box-sizing: border-box;',
-      '  min-width: 328px; max-width: min(520px, calc(100vw - 40px)); padding: 5px 6px 5px 9px;',
+      '  min-width: 430px; max-width: min(560px, calc(100vw - 40px)); padding: 5px 6px 5px 9px;',
       '  border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px;',
       '  background: var(--dsw-alias-bg-overlay);',
       '  box-shadow: 0 10px 26px color-mix(in srgb, var(--dsw-alias-label-primary) 16%, transparent);',
@@ -74,6 +117,16 @@ window.__ModuleLoader__.load({
       '.dsf-count { flex: none; padding: 0 2px; color: var(--dsw-alias-label-secondary);',
       '  font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }',
       '.dsf-count-empty { color: var(--dsw-alias-state-error-primary); }',
+      '.dsf-scope { display: inline-flex; flex: none; align-items: center; gap: 2px; padding: 2px;',
+      '  border-radius: 7px; background: var(--dsw-alias-bg-layer-2); }',
+      '.dsf-scope-btn { flex: none; min-width: 28px; height: 20px; margin: 0; padding: 0 5px; border: 0;',
+      '  border-radius: 5px; background: transparent; color: var(--dsw-alias-label-secondary);',
+      '  font: inherit; font-size: 12px; line-height: 20px; cursor: pointer; white-space: nowrap; }',
+      '.dsf-scope-btn:hover:not(:disabled):not(.dsf-scope-on) { color: var(--dsw-alias-label-primary); }',
+      '.dsf-scope-btn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: -2px; }',
+      '.dsf-scope-btn:disabled { opacity: 0.4; cursor: default; }',
+      '.dsf-scope-on { background: var(--dsw-alias-bg-overlay); color: var(--dsw-alias-brand-primary);',
+      '  box-shadow: 0 1px 2px color-mix(in srgb, var(--dsw-alias-label-primary) 14%, transparent); }',
       '.dsf-btn { display: inline-flex; flex: none; align-items: center; justify-content: center;',
       '  width: 24px; height: 24px; margin: 0; padding: 0; border: 0; border-radius: 6px;',
       '  background: transparent; color: var(--dsw-alias-label-secondary);',
@@ -246,22 +299,81 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Resolve which transcript row an element sits in. The Chat view marks every
+     * row with the kind of node it renders and rows never nest inside each
+     * other, so the nearest marked ancestor is the row itself. Ancestors are
+     * cached per scan, which keeps a session-wide scan at one attribute read
+     * per distinct element instead of one walk per text node.
+     */
+    function createKindResolver(region) {
+      const cache = new WeakMap();
+      return function kindOf(element) {
+        const walked = [];
+        let current = element;
+        let kind = null;
+        while (current && current.nodeType === 1) {
+          if (cache.has(current)) {
+            kind = cache.get(current);
+            break;
+          }
+          const attribute = current.getAttribute(KIND_ATTR);
+          if (attribute) {
+            kind = attribute;
+            cache.set(current, kind);
+            break;
+          }
+          walked.push(current);
+          if (current === region || current === document.body) break;
+          current = current.parentElement;
+        }
+        for (let index = 0; index < walked.length; index += 1) cache.set(walked[index], kind);
+        return kind;
+      };
+    }
+
+    function matchesScope(kind, scope) {
+      if (scope === SCOPE_USER) return kind !== null && USER_KINDS.has(kind);
+      if (scope === SCOPE_AI) return kind !== null && AI_KINDS.has(kind);
+      return true;
+    }
+
+    /**
+     * Whether the rendered region can be split by source at all. Another view,
+     * or a host version without row kinds, would make the scoped modes report
+     * "no results" forever, so the bar greys them out and keeps searching
+     * everything instead of pretending to filter.
+     */
+    function regionSplitsBySource(region) {
+      if (!region || typeof region.querySelector !== 'function') return false;
+      try {
+        return Boolean(region.querySelector('[' + KIND_ATTR + ']'));
+      } catch (error) {
+        return false;
+      }
+    }
+
+    /**
      * Collect hits inside the rendered region. Matches never span two text
      * nodes, which mirrors what a plain per-node scan can promise: text split
      * across inline markup is not stitched back together.
      */
-    function collectMatches(region, query, caseSensitive, wholeWord) {
+    function collectMatches(region, query, caseSensitive, wholeWord, scope) {
       const matches = [];
       if (!region || !query) return matches;
       if (typeof document.createTreeWalker !== 'function') return matches;
       const needle = caseSensitive ? query : query.toLowerCase();
       if (!needle) return matches;
+      // An unscoped scan reads no row kinds at all, so the default stays as
+      // cheap as it was before scopes existed.
+      const kindOf = scope === SCOPE_ALL ? null : createKindResolver(region);
       let walker = null;
       try {
         walker = document.createTreeWalker(region, NodeFilter.SHOW_TEXT, {
           acceptNode(node) {
             if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
-            return shouldAcceptText(node.parentElement) ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+            if (!shouldAcceptText(node.parentElement)) return NodeFilter.FILTER_REJECT;
+            if (kindOf && !matchesScope(kindOf(node.parentElement), scope)) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
           },
         });
       } catch (error) {
@@ -392,6 +504,16 @@ window.__ModuleLoader__.load({
       const wholeWord = wordState[0];
       const setWholeWord = wordState[1];
 
+      const scopeState = React.useState(SCOPE_ALL);
+      const scope = scopeState[0];
+      const setScope = scopeState[1];
+
+      // Optimistic until the first scan reports what the rendered region can
+      // actually tell apart, so the control does not flicker on every open.
+      const scopeReadyState = React.useState(true);
+      const scopeReady = scopeReadyState[0];
+      const setScopeReady = scopeReadyState[1];
+
       const totalState = React.useState(0);
       const total = totalState[0];
       const setTotal = totalState[1];
@@ -422,7 +544,7 @@ window.__ModuleLoader__.load({
         liveTimer: 0,
         lastKey: null,
       });
-      const params = React.useRef({ query: '', caseSensitive: false, wholeWord: false });
+      const params = React.useRef({ query: '', caseSensitive: false, wholeWord: false, scope: SCOPE_ALL });
       const scanRef = React.useRef(null);
       const moveRef = React.useRef(null);
 
@@ -432,6 +554,7 @@ window.__ModuleLoader__.load({
         query: query,
         caseSensitive: caseSensitive,
         wholeWord: wholeWord,
+        scope: scope,
       };
       openRef.current = open;
       posRef.current = pos;
@@ -442,6 +565,15 @@ window.__ModuleLoader__.load({
         const currentParams = params.current;
         const state = model.current;
         clearHighlights();
+        if (!state.region || !state.region.isConnected) {
+          state.region = findRegion();
+          state.widened = false;
+        }
+        // A region that carries no row kinds cannot be split by source; the
+        // control says so instead of returning a misleading zero.
+        const splittable = regionSplitsBySource(state.region);
+        setScopeReady(splittable);
+        const activeScope = splittable ? currentParams.scope : SCOPE_ALL;
         if (!currentParams.query) {
           state.matches = [];
           state.index = 0;
@@ -449,15 +581,12 @@ window.__ModuleLoader__.load({
           setActive(0);
           return;
         }
-        if (!state.region || !state.region.isConnected) {
-          state.region = findRegion();
-          state.widened = false;
-        }
         let matches = collectMatches(
           state.region,
           currentParams.query,
           currentParams.caseSensitive,
           currentParams.wholeWord,
+          activeScope,
         );
         // The content column detection is a heuristic. If it produced nothing
         // while the page itself contains the phrase, widen the scope to the
@@ -468,6 +597,7 @@ window.__ModuleLoader__.load({
             currentParams.query,
             currentParams.caseSensitive,
             currentParams.wholeWord,
+            activeScope,
           );
           if (widenedMatches.length) {
             state.region = document.body;
@@ -620,11 +750,11 @@ window.__ModuleLoader__.load({
         };
       }, [open]);
 
-      // Re-scan whenever the query or a search option changes.
+      // Re-scan whenever the query, a search option or the scope changes.
       React.useEffect(function () {
         if (!open) return undefined;
         const state = model.current;
-        const key = query + '\u0000' + (caseSensitive ? 'c' : '-') + (wholeWord ? 'w' : '-');
+        const key = query + '\u0000' + (caseSensitive ? 'c' : '-') + (wholeWord ? 'w' : '-') + '\u0000' + scope;
         const changed = state.lastKey !== key;
         state.lastKey = key;
         if (state.queryTimer) window.clearTimeout(state.queryTimer);
@@ -638,7 +768,7 @@ window.__ModuleLoader__.load({
             state.queryTimer = 0;
           }
         };
-      }, [open, query, caseSensitive, wholeWord]);
+      }, [open, query, caseSensitive, wholeWord, scope]);
 
       // Keep the count honest while the session streams new text in.
       React.useEffect(function () {
@@ -691,16 +821,54 @@ window.__ModuleLoader__.load({
 
       const status = !query ? '' : (total === 0 ? translate('noResults') : active + '/' + total);
 
+      function cycleScope(step) {
+        setScope(function (value) {
+          const index = SCOPE_ORDER.indexOf(value);
+          const from = index < 0 ? 0 : index;
+          return SCOPE_ORDER[(from + step + SCOPE_ORDER.length) % SCOPE_ORDER.length];
+        });
+      }
+
       function onInputKeyDown(event) {
         if (event.key === 'Enter') {
           event.preventDefault();
           if (moveRef.current) moveRef.current(event.shiftKey ? -1 : 1);
           return;
         }
+        // Tab is the fastest way to change scope right after Ctrl+F, which is
+        // why it is claimed here rather than left to focus navigation. The two
+        // option toggles keep their own Alt shortcuts so a keyboard user still
+        // reaches everything the bar offers (see onBarKeyDown). When the view
+        // cannot split by source there is nothing to cycle, so Tab stays the
+        // ordinary focus move.
+        if (event.key === 'Tab' && !event.ctrlKey && !event.altKey && !event.metaKey) {
+          if (!scopeReady) return;
+          event.preventDefault();
+          cycleScope(event.shiftKey ? -1 : 1);
+          return;
+        }
         if (event.key === 'Escape') {
           event.preventDefault();
           event.stopPropagation();
           setOpen(false);
+        }
+      }
+
+      function onBarKeyDown(event) {
+        if (!event.altKey || event.ctrlKey || event.metaKey) return;
+        const key = event.key.toLowerCase();
+        if (key === 'c') {
+          event.preventDefault();
+          setCaseSensitive(function (value) {
+            return !value;
+          });
+          return;
+        }
+        if (key === 'w') {
+          event.preventDefault();
+          setWholeWord(function (value) {
+            return !value;
+          });
         }
       }
 
@@ -728,6 +896,7 @@ window.__ModuleLoader__.load({
             onPointerUp: endBarDrag,
             onPointerCancel: endBarDrag,
             onDoubleClick: onBarDoubleClick,
+            onKeyDown: onBarKeyDown,
           },
           h(
             'svg',
@@ -776,6 +945,34 @@ window.__ModuleLoader__.load({
               'aria-live': 'polite',
             },
             status,
+          ),
+          h('span', { className: 'dsf-sep', 'aria-hidden': true }),
+          h(
+            'div',
+            {
+              className: 'dsf-scope',
+              role: 'group',
+              'aria-label': translate('scopeGroup'),
+              title: scopeReady ? null : translate('scopeUnavailable'),
+            },
+            SCOPE_ORDER.map(function (id) {
+              const current = scope === id;
+              return h(
+                'button',
+                {
+                  key: id,
+                  type: 'button',
+                  className: 'dsf-scope-btn' + (current ? ' dsf-scope-on' : ''),
+                  title: scopeReady ? translate(SCOPE_TEXT[id].title) : translate('scopeUnavailable'),
+                  'aria-pressed': current,
+                  disabled: !scopeReady,
+                  onClick() {
+                    setScope(id);
+                  },
+                },
+                translate(SCOPE_TEXT[id].label),
+              );
+            }),
           ),
           h(
             'button',
