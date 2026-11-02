@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Find",
+    "description": "Press Ctrl+F to search the current session, Notepad style: live match count, next/previous navigation and highlighted hits."
+  }
+}
